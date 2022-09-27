@@ -164,7 +164,7 @@ spec:
       type: disabled | enabled
     transferEnv:
     - sourceContainerName: main
-      envName: PROXY_IP    
+      envName: PROXY_IP
   volumes:
   - Name: nginx.conf
     hostPath: /data/nginx/conf
@@ -368,6 +368,87 @@ SidecarSet热升级机制不仅完成了mesh容器的切换，并且提供了新
 
 当前已知的利用SidecarSet热升级机制的案例：
 - [ALIYUN ASM](https://help.aliyun.com/document_detail/193804.html) 实现了Service Mesh中数据面的无损升级
+
+### Inject Pod Metadata
+**FEATURE STATE:** Kruise v1.3.0
+
+SidecarSet支持注入Pod Annotations，如下：
+```yaml
+apiVersion: apps.kruise.io/v1alpha1
+kind: SidecarSet
+spec:
+  containers:
+    ...
+  patchPodMetadata:
+  - annotations:
+      oom-score: '{"log-agent": 1}'
+      custom.example.com/sidecar-configuration: '{"command": "/home/admin/bin/start.sh", "log-level": "3"}'
+    patchPolicy: MergePatchJson
+  - annotations:
+      apps.kruise.io/container-launch-priority: Ordered
+    patchPolicy: Overwrite | Retain
+```
+patchPolicy为注入的策略，如下：
+- **Retain：** 默认策略，如果Pod中存在 annotation[key]=value ，则保留Pod原有的value。只有当 Pod中不存在 annotation[key] 时，才注入 annotations[key]=value。
+- **Overwrite：** 与 Retain 对应，当 Pod 中存在 annotation[key]=value，将被强制覆盖为 value2。
+- **MergePatchJson：** 与 Overwrite 对应，annotations value为 json 字符串。如果 Pod 不存在该 annotations[key]，则直接注入。如果存在，则进行 json value合并。
+例如：Pod中存在 annotations[oom-score]='{"main": 2}'，注入后将 value json合并为 annotations[oom-score]='{"log-agent": 1, "main": 2}'。
+
+**注意：** patchPolicy为Overwrite和MergePatchJson时，SidecarSet原地升级 Sidecar Container时，能够同步更新该 annotations。但是，如果只修改annotations则不能生效，只能搭配Sidecar容器镜像一起原地升级。
+patchPolicy为Retain时，SidecarSet原地升级 Sidecar Container时，将不会同步更新该 annotations。
+
+上述配置后，sidecarSet在注入sidecar container时，会注入Pod annotations，如下：
+```yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  annotations:
+    apps.kruise.io/container-launch-priority: Ordered
+    oom-score: '{"log-agent": 1, "main": 2}'
+    custom.example.com/sidecar-configuration: '{"command": "/home/admin/bin/start.sh", "log-level": "3"}'
+  name: test-pod
+spec:
+  containers:
+    ...
+```
+
+#### 权限控制
+SidecarSet从权限、安全的考虑不应该修改除sidecar container之外的任何Pod yaml。但是目前很多的sidecar container的一些配置，需要从Pod Annotations上来获取。
+为了满足这种场景，同时又能一定程度的兼容安全，sidecarSet注入Pod annotations需要额外的配置白名单，如下：
+
+```yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: kruise-configuration
+  namespace: kube-system
+data:
+  "SidecarSet_PatchPodMetadata_WhiteList": |
+    {
+      "rules": [
+        {
+          "selector":{
+            "matchLabels":{
+              "sidecar":"log-agent"
+            }
+          },
+          "allowedAnnotationKeyExprs": [
+            "^apps.kruise.io/container-launch-priority$",
+            "^oom-score$",
+            "^custom.example.com/sidecar-configuration$"
+          ]
+        }
+      ]
+    }
+```
+- **selector:** 根据Label选择生效的SidecarSet，MatchLabels和MatchExpressions都支持。如果不配置，则对该集群所有的SidecarSet生效。
+- **allowedAnnotationKeyExprs:** 允许修改的Pod annotation key白名单，必须为正则表达式。
+
+#### Feature-gate
+SidecarSet_PatchPodMetadata_WhiteList 主要是考虑到安全，如果用户的集群使用场景比较可控，可以通过 Feature-gate 的方式来关闭白名单的校验，如下：
+```shell
+$ helm install kruise https://... --set featureGates="SidecarSetPatchPodMetadataDefaultsAllowed=true"
+```
 
 ### SidecarSet状态说明
 通过sidecarset原地升级sidecar容器时，可以通过SidecarSet.Status来观察升级的过程
